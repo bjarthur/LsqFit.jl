@@ -1,4 +1,3 @@
-
 immutable LsqFitResult{T}
 	# simple type container for now, but can be expanded later
 	dof::Int
@@ -7,7 +6,30 @@ immutable LsqFitResult{T}
 	jacobian::Matrix{T}
 end
 
-function lmfit(f::Function, p0; kwargs...)
+## these two functions could be put in Calculus.jl
+function analytic_jacobian{T<:Number}(fdot::Vector{Function}, x::Vector{T})
+    f_x = fdot[1](x)
+    J = Array(Float64,length(f_x),length(x))
+    J[:,1] = f_x
+    for i = 2:length(fdot)
+        J[:,i] = fdot[i](x)
+    end
+    J
+end
+
+"""
+    `jacobian(fdot::Vector{Function}) -> g(x::Vector)`
+
+Given a function `f` whose partial derivatives are `fdot`, return a function
+`g(x)` which itself returns the Jacobian of `f` at `x`.
+"""
+function jacobian(fdot::Vector{Function})
+    g(x::Vector) = analytic_jacobian(fdot, x)
+    return g
+end
+##
+
+function lmfit(f::Function, g::Function, p0; kwargs...)
 	# this is a convenience function for the curve_fit() methods
 	# which assume f(p) is the cost functionj i.e. the residual of a
 	# model where
@@ -23,9 +45,6 @@ function lmfit(f::Function, p0; kwargs...)
 	#   f(p) : function evaluated at best fit p, (weighted) residuals
 	#   g(p) : estimated Jacobian at p (Jacobian with respect to p)
 
-	# construct Jacobian function, which uses finite difference method
-	g = Calculus.jacobian(f)
-
 	results = Optim.levenberg_marquardt(f, g, p0; kwargs...)
 	p = results.minimum
 	resid = f(p)
@@ -33,20 +52,61 @@ function lmfit(f::Function, p0; kwargs...)
 	return LsqFitResult(dof, p, f(p), g(p))
 end
 
-function curve_fit(model::Function, xpts, ydata, p0; kwargs...)
-	# construct the cost function
-	f(p) = model(xpts, p) - ydata
-	lmfit(f,p0; kwargs...)
+function curve_fit{T<:Number}(model::Function, modeldot::Vector{Function}, xpts::AbstractArray{T,1}, ydata, p0; kwargs...)
+    # construct the cost function
+    f(p) = model(xpts, p) - ydata
+
+    # construct the derivatives of the cost function
+    fdot = Vector{Function}(length(modeldot))
+    for i in eachindex(modeldot)
+        fdot[i] = (p) -> modeldot[i](xpts,p)
+    end
+
+    # construct Jacobian function, with the user-supplied model derivatives
+    g = jacobian(fdot)
+
+    lmfit(f,g,p0; kwargs...)
 end
 
-function curve_fit(model::Function, xpts, ydata, wt::Vector, p0; kwargs...)
+function curve_fit{T<:Number}(model::Function, xpts::AbstractArray{T,1}, ydata, p0; kwargs...)
+	# construct the cost function
+	f(p) = model(xpts, p) - ydata
+
+	# construct Jacobian function, which uses finite difference method
+	g = Calculus.jacobian(f)
+
+	lmfit(f,g,p0; kwargs...)
+end
+
+function curve_fit{T<:Number}(model::Function, modeldot::Vector{Function}, xpts::AbstractArray{T,1}, ydata, wt::Vector, p0; kwargs...)
 	# construct a weighted cost function, with a vector weight for each ydata
 	# for example, this might be wt = 1/sigma where sigma is some error term
 	f(p) = wt .* ( model(xpts, p) - ydata )
-	lmfit(f,p0; kwargs...)
+
+    # construct the derivatives of the cost function
+    fdot = Vector{Function}(length(modeldot))
+    for i in eachindex(modeldot)
+        fdot[i] = (p) -> wt[i] * modeldot[i](xpts,p)
+    end
+
+    # construct Jacobian function, with the user-supplied model derivatives
+    g = jacobian(fdot)
+
+	lmfit(f,g,p0; kwargs...)
 end
 
-function curve_fit(model::Function, xpts, ydata, wt::Matrix, p0; kwargs...)
+function curve_fit{T<:Number}(model::Function, xpts::AbstractArray{T,1}, ydata, wt::Vector, p0; kwargs...)
+	# construct a weighted cost function, with a vector weight for each ydata
+	# for example, this might be wt = 1/sigma where sigma is some error term
+	f(p) = wt .* ( model(xpts, p) - ydata )
+
+	# construct Jacobian function, which uses finite difference method
+	g = Calculus.jacobian(f)
+
+	lmfit(f,g,p0; kwargs...)
+end
+
+function curve_fit{T<:Number}(model::Function, xpts::AbstractArray{T,1}, ydata, wt::Matrix, p0; kwargs...)
 	# as before, construct a weighted cost function with where this
 	# method uses a matrix weight.
 	# for example: an inverse_covariance matrix
@@ -56,8 +116,11 @@ function curve_fit(model::Function, xpts, ydata, wt::Matrix, p0; kwargs...)
 	# This requires the matrix to be positive definite
 	u = chol(wt)
 
+	# construct Jacobian function, which uses finite difference method
+	g = Calculus.jacobian(f)
+
 	f(p) = u * ( model(xpts, p) - ydata )
-	lmfit(f,p0; kwargs...)
+	lmfit(f,g,p0; kwargs...)
 end
 
 function estimate_covar(fit::LsqFitResult)
